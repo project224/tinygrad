@@ -1,6 +1,6 @@
 # tests for the ir3 disassembly parser in test/mockgpu/qcom/ir3.py, these need no device
 import unittest
-from test.mockgpu.qcom.ir3 import parse
+from test.mockgpu.qcom.ir3 import Label, parse
 
 class TestIR3Parse(unittest.TestCase):
   def test_register_flat_index(self):
@@ -47,6 +47,16 @@ class TestIR3Parse(unittest.TestCase):
     self.assertEqual(parse("nop").op, "nop")
     self.assertEqual(parse("nop").srcs, [])
     self.assertIsNone(parse("   "))
+
+  def test_labels_and_branch_targets(self):
+    # a label is its own line, and a branch names it with a leading #
+    self.assertIsInstance(parse("l25:"), Label)
+    self.assertEqual(parse("l25:").name, "l25")
+    ins = parse("br p0.y, #l25")
+    self.assertEqual(ins.op, "br")
+    self.assertEqual(ins.srcs[0], ("p", 1, False, False, False))  # p0.y, the predicate file indexes flat too
+    self.assertEqual(ins.srcs[1], ("label", "l25"))
+    self.assertEqual(parse("jump #l6").srcs[0], ("label", "l6"))
 
   def test_unknown_operand_is_kept_raw(self):
     # anything the parser does not recognise stays visible instead of silently decoding wrong

@@ -19,9 +19,20 @@ def disasm(lib:bytes, gpu_id:int=630) -> list[str]:
 # ***** parsing *****
 
 FLAGS = ("sy", "ss", "jp", "ul", "eq")  # sync and scheduling flags, none of which affect results in an emulator
-REG = re.compile(r"^(?P<neg>-)?(?P<abs>\|)?(?P<h>h)?(?P<file>r|c)(?P<num>\d+)\.(?P<comp>[xyzw])\|?$")
+# the p file holds the predicates cmps writes and br reads, and indexes flat like r and c do
+REG = re.compile(r"^(?P<neg>-)?(?P<abs>\|)?(?P<h>h)?(?P<file>r|c|p)(?P<num>\d+)\.(?P<comp>[xyzw])\|?$")
+LABEL = re.compile(r"^(l\d+):$")            # a label sits alone on its own line
+LABEL_REF = re.compile(r"^#(l\d+)$")        # branches name their target as "#l25"
+# control flow and synchronisation write no register, so their first operand is a source and not a destination
+NO_DST = ("br", "brao", "braa", "bany", "ball", "jump", "call", "ret", "kill", "end", "nop", "bar", "fence", "predt", "predf", "prede")
 # a memory operand names its address space and an address, eg "g[r1.x]" or "l[r2.y+4]"
 MEM = re.compile(r"^(?P<space>[a-z]+)\[(?P<addr>[^\]]+)\]$")
+
+class Label:
+  """A branch target. Labels are their own disassembly line, so they carry no instruction."""
+  __slots__ = ("name",)
+  def __init__(self, name:str): self.name = name
+  def __repr__(self): return f"{self.name}:"
 
 class Inst:
   __slots__ = ("op", "dst", "srcs", "rpt", "nop", "flags", "line")
@@ -38,14 +49,16 @@ def _operand(tok:str):
   if re.fullmatch(r"[-+]?\d+", tok): return ("imm", int(tok))
   if re.fullmatch(r"[-+]?(0[xX])?[0-9a-fA-F]+", tok) and tok.lower().startswith("0x"): return ("imm", int(tok, 16))
   if re.fullmatch(r"[-+]?\d*\.\d+", tok): return ("immf", float(tok))
+  if (m := LABEL_REF.match(tok)) is not None: return ("label", m.group(1))
   if (m := MEM.match(tok)) is not None:
     base, _, off = m.group("addr").partition("+")
     return ("mem", m.group("space"), _operand(base), int(off) if off.strip() else 0)
   return ("raw", tok)
 
-def parse(line:str) -> Inst|None:
+def parse(line:str) -> Inst|Label|None:
   """Parses one disassembly line, eg '(nop3) add.u r2.x, c0.w, r0.w' or '(rpt2)(ss)cov.u32f32 r1.x, r0.x'."""
   if not (line := line.strip()): return None
+  if (m := LABEL.match(line)) is not None: return Label(m.group(1))
   rpt, nop, flags = 0, 0, set()
   while (m := re.match(r"^\((\w+?)(\d*)\)\s*", line)):
     name, num = m.group(1), m.group(2)
@@ -56,7 +69,17 @@ def parse(line:str) -> Inst|None:
   if not line: return None
   op, _, rest = line.partition(" ")
   ops = [_operand(x) for x in rest.split(",")] if rest.strip() else []
+  if op.split(".")[0] in NO_DST: return Inst(op, None, ops, rpt, nop, flags, line)
   return Inst(op, ops[0] if ops else None, ops[1:], rpt, nop, flags, line)
 
-def decode(lib:bytes, gpu_id:int=630) -> list[Inst]:
-  return [i for l in disasm(lib, gpu_id) if (i := parse(l)) is not None]
+def decode(lib:bytes, gpu_id:int=630) -> tuple[list[Inst], dict[str, int]]:
+  """The instruction stream with labels lifted out, plus the index each label points at."""
+  insts:list[Inst] = []
+  labels:dict[str, int] = {}
+  for l in disasm(lib, gpu_id):
+    if (i := parse(l)) is None: continue
+    if isinstance(i, Label): labels[i.name] = len(insts)
+    else:
+      insts.append(i)
+      if i.op == "end": break  # the shader is padded with nops out to the end of the page
+  return insts, labels
